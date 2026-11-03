@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="description" content="Missile Command — defend six cities from waves of incoming warheads. Launch interceptors, blast shockwaves, chain combos. Free single-file HTML5 game.">
+<title>Missile Command — City Defense</title>
+<script>
+// 平台 SDK 按域名条件加载（独立运行时完全不加载，游戏行为不变）
+(function () {
+  var host = location.hostname || "";
+  try {
+    if (host.indexOf("crazygames") !== -1) {
+      var s1 = document.createElement("script");
+      s1.src = "https://sdk.crazygames.com/crazygames-sdk-v3.js";
+      s1.onload = function () {
+        if (window.CrazyGames && window.CrazyGames.SDK) {
+          window.CrazyGames.SDK.init().then(function () {
+            try { window.CrazyGames.SDK.game.loadingStart(); } catch (e) {}
+            window.addEventListener("load", function () { try { window.CrazyGames.SDK.game.loadingStop(); } catch (e) {} });
+          }).catch(function () {});
+        }
+      };
+      document.head.appendChild(s1);
+      window.__portal = "crazygames";
+    } else if (host.indexOf("gamedistribution") !== -1 || host.indexOf("html5.gamedistribution.com") !== -1 || host.indexOf("gd.games") !== -1) {
+      var s2 = document.createElement("script");
+      s2.src = "https://sdk.gamedistribution.com/v2/main.min.js";
+      document.head.appendChild(s2);
+      window.__portal = "gamedistribution";
+    }
+  } catch (e) {}
+})();
+</script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { height:100%; overflow:hidden; background:#05050e; font-family:-apple-system,"Helvetica Neue",Arial,sans-serif; }
+  #wrap { height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+  #hud { display:flex; align-items:center; gap:26px; padding:6px 10px; color:#e8e8f2; }
+  .stat { text-align:center; min-width:64px; }
+  .stat .label { font-size:10px; color:#7f8ab0; letter-spacing:2px; }
+  .stat .val { font-size:19px; font-weight:800; color:#dfe6ff; }
+  canvas { display:block; border-radius:12px; touch-action:none; cursor:crosshair; box-shadow:0 0 40px rgba(90,60,200,.25); }
+  #muteBtn { background:rgba(18,18,42,.85); border:1px solid #2c2c58; color:#cfd2ff; border-radius:10px; padding:6px 10px; font-size:11px; font-weight:700; cursor:pointer; }
+  #overlay { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(4,4,14,.78); z-index:5; }
+  #panel { background:#12122a; border:1px solid #32325e; border-radius:18px; padding:24px 30px; text-align:center; color:#fff; max-width:86%; }
+  #panel h2 { font-size:24px; margin-bottom:8px; color:#7de8ff; letter-spacing:2px; }
+  #panel p { color:#9a9ac8; font-size:12.5px; line-height:1.65; margin-bottom:12px; }
+  #panel .final { font-size:34px; font-weight:900; color:#ffd76a; margin-bottom:14px; }
+  #mainBtn { background:linear-gradient(135deg,#ff5a3c,#ff9a3c); color:#fff; border:none; border-radius:12px; padding:12px 36px; font-size:16px; font-weight:800; cursor:pointer; letter-spacing:1px; }
+  #mainBtn:active { transform:scale(.97); }
+  #footer { color:#55556e; font-size:11px; padding:5px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <div class="stat"><div class="label">SCORE</div><div class="val" id="score">0</div></div>
+    <div class="stat"><div class="label">WAVE</div><div class="val" id="wave">1</div></div>
+    <div class="stat"><div class="label">BEST</div><div class="val" id="best">0</div></div>
+    <button id="muteBtn">SOUND ON</button>
+  </div>
+  <div style="position:relative">
+    <canvas id="game"></canvas>
+    <div id="overlay"><div id="panel">
+      <h2 id="ovTitle">MISSILE COMMAND</h2>
+      <p id="ovText"></p>
+      <div class="final" id="finalScore">0</div>
+      <button id="mainBtn">START</button>
+    </div></div>
+  </div>
+  <div id="footer">Missile Command — a free arcade defense game</div>
+</div>
+<script>
+"use strict";
+/*
+ * Missile Command — 城市拦截防御（单文件 HTML5）
+ * 规则速览：
+ *  - 底部 6 座城市 + 3 座反导弹塔（左 10 / 中 15 / 右 10 发拦截弹）。
+ *  - 敌方导弹从顶部多枚同时落下，带拖尾，速度随波次渐快；每波 8+2×wave 枚。
+ *  - 2 波起出现 MIRV：中适数枚分裂成 2 枚独立子弹（母弹消失，子弹各自选新目标）。
+ *  - 点击/触控任意位置：由最近的有弹塔发射拦截弹，沿直线飞向"发射时刻"的目标点
+ *    （经典行为：不追踪），抵达后爆出冲击波圆环（半径 70，持续 1.2s）。
+ *  - 冲击波接触敌弹即引爆：+25 分；1 秒内连续引爆形成连击，倍率 ×1..×8；
+ *    被引爆的敌弹自身再爆出冲击波 → 链式引爆。
+ *  - 敌弹落地：命中城市 → 城市永久摧毁；落空 → 地面小爆（同样能引爆附近敌弹）。
+ *  - 全城摧毁 = 游戏结束。每波结束：存活城市每座 +100、剩余拦截弹每发 +5；
+ *    每 2 波奖励重建 1 座被毁城市。
+ * 调参表：拦截弹速 560 px/s；爆炸 R70/1.2s，地面爆 R42/0.7s，城市爆 R55/0.9s；
+ *          敌速 55+9×wave（上限 150），出弹间隔 max(0.85, 2.3-0.15×wave)。
+ * 体系结构：纯逻辑（stepToward/inBlast/blastRadius/update）与渲染分离，
+ *           window.__mc 暴露测试钩子供 node vm 单测使用。
+ */
+// ---------- 常量（虚拟坐标 800x600，渲染时按窗口缩放） ----------
+var W = 800, H = 600, GROUND_Y = 560;
+var INTERCEPTOR_SPEED = 560;
+var BLAST_R = 70, BLAST_DUR = 1.2;              // 拦截弹/链式爆炸：半径70，持续1.2s
+var GROUND_BLAST_R = 42, GROUND_BLAST_DUR = 0.7; // 落地小爆
+var CITY_BLAST_R = 55, CITY_BLAST_DUR = 0.9;    // 城市被毁大爆
+var CITY_HALF = 34;                              // 城市碰撞半宽
+var TURRET_X = [70, 400, 730], TURRET_AMMO = [10, 15, 10];
+var CITY_X = [165, 245, 325, 475, 555, 635];
+
+var canvas = document.getElementById("game");
+var ctx = canvas.getContext("2d");
+var view = { scale: 1, dpr: 1 };
+
+function resize() {
+  var hud = document.getElementById("hud"), foot = document.getElementById("footer");
+  var iw = window.innerWidth || 980, ih = window.innerHeight || 720;
+  var availW = Math.max(240, iw - 12);
+  var availH = Math.max(200, ih - (hud.offsetHeight || 44) - (foot.offsetHeight || 22) - 10);
+  var s = Math.min(availW / W, availH / H);
+  view.scale = Math.max(0.25, Math.min(s, 1.6));
+  view.dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(W * view.scale * view.dpr);
+  canvas.height = Math.round(H * view.scale * view.dpr);
+  canvas.style.width = Math.round(W * view.scale) + "px";
+  canvas.style.height = Math.round(H * view.scale) + "px";
+}
+window.addEventListener("resize", resize);
+
+// ---------- 状态 ----------
+var state = "START"; // START | PLAYING | SUMMARY | OVER
+var score = 0, best = 0, wave = 1;
+var combo = 0, lastKillT = -99, gameTime = 0, ambient = 0;
+var shake = 0, bannerT = 0;
+var waveQueue = 0, spawnTimer = 0, spawnInterval = 2.2;
+var missiles = [], interceptors = [], explosions = [], particles = [], floats = [];
+var stars = [];
+var mouse = { x: 400, y: 300, seen: false };
+try { best = parseInt(localStorage.getItem("mc_best") || "0", 10) || 0; } catch (e) {}
+var muted = false;
+try { muted = localStorage.getItem("mc_muted") === "1"; } catch (e) {}
+for (var si = 0; si < 110; si++) stars.push({ x: Math.random() * W, y: Math.random() * (GROUND_Y - 60), r: 0.5 + Math.random() * 1.2, ph: Math.random() * 6.28, sp: 0.4 + Math.random() * 1.6 });
+
+var turrets = [], cities = [];
+function setupWorld() {
+  turrets.length = 0; cities.length = 0;
+  for (var i = 0; i < TURRET_X.length; i++) turrets.push({ x: TURRET_X[i], ammo: TURRET_AMMO[i] });
+  for (var j = 0; j < CITY_X.length; j++) cities.push({ x: CITY_X[j], alive: true });
+}
+
+var elScore = document.getElementById("score"), elWave = document.getElementById("wave"), elBest = document.getElementById("best");
+var overlay = document.getElementById("overlay"), ovTitle = document.getElementById("ovTitle"), ovText = document.getElementById("ovText");
+var finalScore = document.getElementById("finalScore"), mainBtn = document.getElementById("mainBtn"), muteBtn = document.getElementById("muteBtn");
+
+function addScore(n) {
+  score += n;
+  elScore.textContent = String(score);
+  if (score > best) { best = score; try { localStorage.setItem("mc_best", String(best)); } catch (e) {} elBest.textContent = String(best); }
+}
+
+// ---------- 纯函数：直线运动 / 圆形判定 / 冲击波半径包络 ----------
+// 拦截弹沿直线飞向"发射时刻"的固定目标点（经典行为：不追踪）
+function stepToward(p, tx, ty, speed, dt) {
+  var dx = tx - p.x, dy = ty - p.y;
+  var d = Math.sqrt(dx * dx + dy * dy);
+  var step = speed * dt;
+  if (d <= step || d === 0) { p.x = tx; p.y = ty; return true; }
+  p.x += dx / d * step; p.y += dy / d * step;
+  return false;
+}
+// 冲击波碰撞判定（圆形，含边界）
+function inBlast(mx, my, cx, cy, r) {
+  var dx = mx - cx, dy = my - cy;
+  return dx * dx + dy * dy <= r * r;
+}
+// 爆炸半径包络：快速扩张 -> 保持 -> 收缩消失
+function blastRadius(age, maxR, dur) {
+  if (age < 0) return 0;
+  var e = Math.min(0.25, dur * 0.25), h = dur * 0.7;
+  if (age < e) return maxR * (age / e);
+  if (age < h) return maxR;
+  if (age < dur) return maxR * (1 - (age - h) / (dur - h));
+  return 0;
+}
+
+// ---------- 音效（WebAudio 合成） ----------
+var actx = null, master = null;
+function ensureAudio() {
+  try {
+    if (!actx) {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      actx = new AC();
+      master = actx.createGain();
+      master.gain.value = muted ? 0 : 1;
+      master.connect(actx.destination);
+    }
+    if (actx.state === "suspended") actx.resume();
+  } catch (e) {}
+}
+function tone(freq, dur, type, gainv, slideTo, delay) {
+  try {
+    if (!actx || muted) return;
+    var t0 = actx.currentTime + (delay || 0);
+    var o = actx.createOscillator(), g = actx.createGain();
+    o.type = type || "sine";
+    o.frequency.setValueAtTime(freq, t0);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(30, slideTo), t0 + dur);
+    g.gain.setValueAtTime(gainv || 0.1, t0);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    o.connect(g); g.connect(master);
+    o.start(t0); o.stop(t0 + dur + 0.02);
+  } catch (e) {}
+}
+function noiseBurst(dur, gainv, cut, delay) {
+  try {
+    if (!actx || muted) return;
+    var t0 = actx.currentTime + (delay || 0);
+    var n = Math.max(1, Math.floor(actx.sampleRate * dur));
+    var buf = actx.createBuffer(1, n, actx.sampleRate);
+    var d = buf.getChannelData(0);
+    for (var i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    var src = actx.createBufferSource(); src.buffer = buf;
+    var f = actx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = cut || 1000;
+    var g = actx.createGain();
+    g.gain.setValueAtTime(gainv || 0.2, t0);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    src.connect(f); f.connect(g); g.connect(master);
+    src.start(t0);
+  } catch (e) {}
+}
+function sfxLaunch() { tone(150, 0.2, "square", 0.05, 700); noiseBurst(0.08, 0.05, 2200); }
+function sfxBoom() { noiseBurst(0.35, 0.28, 750); tone(85, 0.32, "sine", 0.16, 38); }
+function sfxPop(c) { tone(620 + Math.min(c, 8) * 45, 0.09, "triangle", 0.11, 1100); }
+function sfxCityDown() { tone(330, 0.5, "sawtooth", 0.15, 60); noiseBurst(0.7, 0.32, 420); tone(220, 0.4, "square", 0.1, 55, 0.12); }
+function sfxAlarm() { for (var i = 0; i < 3; i++) { tone(620, 0.13, "square", 0.07, 620, i * 0.3); tone(430, 0.13, "square", 0.07, 430, i * 0.3 + 0.15); } }
+function sfxWaveClear() { tone(523, 0.12, "triangle", 0.11); tone(659, 0.12, "triangle", 0.11, 0, 0.12); tone(784, 0.22, "triangle", 0.12, 0, 0.24); }
+function sfxOut() { tone(150, 0.1, "square", 0.06, 95); }
+
+// ---------- 敌弹 / MIRV ----------
+function enemySpeed() { return Math.min(150, 55 + (wave - 1) * 9); }
+function mirvChance() { return wave >= 2 ? Math.min(0.06 + 0.05 * (wave - 1), 0.35) : 0; }
+function pickTargetX() {
+  var r = Math.random(), alive = [];
+  for (var i = 0; i < cities.length; i++) if (cities[i].alive) alive.push(cities[i].x);
+  if (alive.length && r < 0.62) return alive[Math.floor(Math.random() * alive.length)] + (Math.random() * 16 - 8);
+  if (r < 0.85) return TURRET_X[Math.floor(Math.random() * TURRET_X.length)] + (Math.random() * 20 - 10);
+  return 40 + Math.random() * (W - 80);
+}
+function spawnEnemyMissile(opts) {
+  opts = opts || {};
+  var m = {
+    x: opts.x !== undefined ? opts.x : 24 + Math.random() * (W - 48),
+    y: opts.y !== undefined ? opts.y : -12,
+    tx: opts.tx !== undefined ? opts.tx : pickTargetX(),
+    ty: GROUND_Y,
+    speed: opts.speed !== undefined ? opts.speed : enemySpeed() * (0.85 + Math.random() * 0.3),
+    mirv: false, splitY: 0
+  };
+  m.sx = m.x; m.sy = m.y;
+  if (opts.mirv) { m.mirv = true; m.splitY = opts.splitY !== undefined ? opts.splitY : 120 + Math.random() * 170; }
+  missiles.push(m);
+  return m;
+}
+// MIRV 中途分裂：母弹消失，替换为 2 枚独立子弹（各自随机/指定新目标）
+function splitMirv(m, c1x, c2x) {
+  var idx = missiles.indexOf(m);
+  if (idx < 0) return 0;
+  missiles.splice(idx, 1);
+  var kids = [c1x, c2x];
+  for (var i = 0; i < 2; i++) {
+    missiles.push({
+      x: m.x, y: m.y, sx: m.x, sy: m.y,
+      tx: kids[i] !== undefined ? kids[i] : pickTargetX(),
+      ty: GROUND_Y,
+      speed: m.speed * (0.9 + Math.random() * 0.2),
+      mirv: false, splitY: 0
+    });
+  }
+  tone(980, 0.08, "square", 0.05, 1400);
+  return 2;
+}
+
+// ---------- 发射 / 命中 ----------
+function fireAt(px, py) {
+  if (state !== "PLAYING") return false;
+  var tx = Math.max(8, Math.min(W - 8, px));
+  var ty = Math.max(30, Math.min(GROUND_Y - 8, py));
+  var bestT = -1, bestD = Infinity;
+  for (var i = 0; i < turrets.length; i++) {
+    var t = turrets[i];
+    if (t.ammo <= 0) continue;                       // 没弹的塔不参与
+    var dx = t.x - tx, dy = (GROUND_Y - 14) - ty;
+    var d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; bestT = i; }
+  }
+  if (bestT < 0) { sfxOut(); return false; }         // 弹药耗尽：点击无效
+  turrets[bestT].ammo--;
+  var ox = turrets[bestT].x;
+  interceptors.push({ x: ox, y: GROUND_Y - 14, sx: ox, sy: GROUND_Y - 14, tx: tx, ty: ty, speed: INTERCEPTOR_SPEED });
+  sfxLaunch();
+  return true;
+}
+function killMissile(k) {
+  var ms = missiles[k];
+  missiles.splice(k, 1);
+  if (gameTime - lastKillT <= 1.0) combo++; else combo = 1;   // 连击窗口 1s
+  lastKillT = gameTime;
+  var pts = 25 * Math.min(combo, 8);
+  addScore(pts);
+  explosions.push({ x: ms.x, y: ms.y, age: 0, maxR: BLAST_R, dur: BLAST_DUR }); // 链式爆炸
+  addFloat(ms.x, ms.y - 10, "+" + pts + (combo > 1 ? "  x" + Math.min(combo, 8) : ""), combo > 1 ? "#ffd76a" : "#ffe8c0");
+  sparks(ms.x, ms.y, "#ffb347", 12);
+  sfxPop(combo);
+}
+function groundImpact(ms) {
+  var hit = -1;
+  for (var i = 0; i < cities.length; i++) {
+    var c = cities[i];
+    if (c.alive && Math.abs(ms.x - c.x) <= CITY_HALF) { hit = i; break; }
+  }
+  if (hit >= 0) {
+    cities[hit].alive = false;                        // 城市永久摧毁（直到波次奖励重建）
+    explosions.push({ x: ms.x, y: GROUND_Y - 6, age: 0, maxR: CITY_BLAST_R, dur: CITY_BLAST_DUR });
+    shake = 10;
+    addFloat(ms.x, GROUND_Y - 44, "CITY DESTROYED", "#ff5566");
+    cityParticles(ms.x);
+    sfxCityDown();
+    checkGameOver();
+  } else {
+    explosions.push({ x: ms.x, y: GROUND_Y - 4, age: 0, maxR: GROUND_BLAST_R, dur: GROUND_BLAST_DUR });
+    sfxBoom();
+  }
+}
+function checkGameOver() {
+  for (var i = 0; i < cities.length; i++) if (cities[i].alive) return;
+  gameOver();
+}
+function gameOver() {
+  state = "OVER";
+  showOverlay("GAME OVER",
+    "All six cities lie in ruins.<br>Final score: " + score + (score >= best && score > 0 ? " — NEW BEST!" : "<br>Best: " + best),
+    "PLAY AGAIN", true);
+  tone(55, 0.9, "sine", 0.2, 30);
+  // 平台埋点：一局结束（各 SDK 已做域名守卫）
+  try {
+    if (window.__portal === "crazygames" && window.CrazyGames && window.CrazyGames.SDK) {
+      window.CrazyGames.SDK.game.gameplayStop();
+      window.CrazyGames.SDK.game.happytime();
+    }
+  } catch (e) {}
+}
+
+// ---------- 波次 ----------
+function startWave(n) {
+  wave = n;
+  waveQueue = 8 + 2 * n;
+  spawnInterval = Math.max(0.85, 2.3 - n * 0.15);
+  spawnTimer = 0.8;
+  combo = 0; lastKillT = -99;
+  bannerT = 1.6;
+  state = "PLAYING";
+  hideOverlay();
+  elWave.textContent = String(n);
+  sfxAlarm();
+  // 平台埋点：进入实际玩法
+  try {
+    if (window.__portal === "crazygames" && window.CrazyGames && window.CrazyGames.SDK) {
+      window.CrazyGames.SDK.game.gameplayStart();
+    }
+  } catch (e) {}
+}
+function endWave() {
+  var aliveN = 0, ammoN = 0, i;
+  for (i = 0; i < cities.length; i++) if (cities[i].alive) aliveN++;
+  for (i = 0; i < turrets.length; i++) ammoN += turrets[i].ammo;
+  var cityPts = aliveN * 100, ammoPts = ammoN * 5;
+  addScore(cityPts + ammoPts);
+  var rebuilt = false;
+  if (wave % 2 === 0) {
+    for (i = 0; i < cities.length; i++) {
+      if (!cities[i].alive) { cities[i].alive = true; rebuilt = true; break; }
+    }
+  }
+  state = "SUMMARY";
+  sfxWaveClear();
+  showOverlay("WAVE " + wave + " CLEARED",
+    "Cities survived ×" + aliveN + " → +" + cityPts + "<br>Ammo remaining ×" + ammoN + " → +" + ammoPts + (rebuilt ? "<br><span style='color:#7dffb0'>A bonus city was rebuilt!</span>" : ""),
+    "NEXT WAVE", true);
+}
+function nextWave() { startWave(wave + 1); }
+function newGame() {
+  score = 0; gameTime = 0; combo = 0; lastKillT = -99; shake = 0; bannerT = 0;
+  missiles.length = 0; interceptors.length = 0; explosions.length = 0; particles.length = 0; floats.length = 0;
+  setupWorld();
+  elScore.textContent = "0";
+  startWave(1);
+}
+
+// ---------- 更新 ----------
+function update(dt) {
+  gameTime += dt;
+  // 出弹调度
+  if (waveQueue > 0) {
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) {
+      var batch = Math.min(waveQueue, 1 + Math.floor(Math.random() * 3));
+      for (var b = 0; b < batch; b++) spawnEnemyMissile({ mirv: Math.random() < mirvChance() });
+      waveQueue -= batch;
+      spawnTimer = spawnInterval * (0.7 + Math.random() * 0.6);
+    }
+  }
+  // 拦截弹（直线飞向发射时刻的固定目标点）
+  for (var i = interceptors.length - 1; i >= 0; i--) {
+    var ic = interceptors[i];
+    if (stepToward(ic, ic.tx, ic.ty, ic.speed, dt)) {
+      interceptors.splice(i, 1);
+      explosions.push({ x: ic.tx, y: ic.ty, age: 0, maxR: BLAST_R, dur: BLAST_DUR });
+      sfxBoom();
+    }
+  }
+  // 敌弹 + MIRV 分裂 + 落地
+  for (var m = missiles.length - 1; m >= 0; m--) {
+    var ms = missiles[m];
+    var arrived = stepToward(ms, ms.tx, ms.ty, ms.speed, dt);
+    if (ms.mirv && !arrived && ms.y >= ms.splitY) { splitMirv(ms); continue; }
+    if (arrived) { missiles.splice(m, 1); groundImpact(ms); }
+  }
+  // 爆炸老化 + 冲击波引爆（链式）
+  for (var e = explosions.length - 1; e >= 0; e--) {
+    var ex = explosions[e];
+    ex.age += dt;
+    var r = blastRadius(ex.age, ex.maxR, ex.dur);
+    if (r <= 0) { explosions.splice(e, 1); continue; }
+    for (var k = missiles.length - 1; k >= 0; k--) {
+      var ms2 = missiles[k];
+      if (inBlast(ms2.x, ms2.y, ex.x, ex.y, r)) killMissile(k);
+    }
+  }
+  // 波次结束：出弹队列空 + 场上无活弹/拦截弹/爆炸
+  if (state === "PLAYING" && waveQueue === 0 && missiles.length === 0 && interceptors.length === 0 && explosions.length === 0) endWave();
+  // 粒子 / 浮字 / 震屏 / 横幅
+  for (var p = particles.length - 1; p >= 0; p--) {
+    var pt = particles[p]; pt.life -= dt;
+    if (pt.life <= 0) { particles.splice(p, 1); continue; }
+    pt.x += pt.vx * dt; pt.y += pt.vy * dt; pt.vy += 260 * dt;
+  }
+  for (var f = floats.length - 1; f >= 0; f--) {
+    var fl = floats[f]; fl.life -= dt; fl.y -= 34 * dt;
+    if (fl.life <= 0) floats.splice(f, 1);
+  }
+  shake = Math.max(0, shake - 30 * dt);
+  bannerT = Math.max(0, bannerT - dt);
+}
+
+// ---------- 特效 ----------
+function sparks(x, y, color, n) {
+  for (var i = 0; i < n; i++) {
+    var a = Math.random() * Math.PI * 2, s = 40 + Math.random() * 140;
+    particles.push({ x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 60, life: 0.4 + Math.random() * 0.35, size: 1.5 + Math.random() * 2.5, color: color });
+  }
+}
+function cityParticles(x) {
+  for (var i = 0; i < 26; i++) {
+    var a = -Math.PI / 2 + (Math.random() - 0.5) * 2.4, s = 60 + Math.random() * 180;
+    particles.push({ x: x + (Math.random() - 0.5) * 40, y: GROUND_Y - 4, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.6 + Math.random() * 0.6, size: 2 + Math.random() * 3, color: i % 3 ? "#ff6a4a" : "#8a8aa0" });
+  }
+}
+function addFloat(x, y, text, color) { floats.push({ x: x, y: y, text: text, life: 1.0, color: color || "#fff" }); }
+
+// ---------- 渲染 ----------
+var CITY_SKY = [
+  [[0,12,18],[12,9,26],[21,13,14],[34,8,22],[42,12,16],[54,8,24]],
+  [[0,10,24],[10,12,15],[22,9,28],[31,12,18],[43,9,22],[52,10,14]]
+];
+function drawCity(c, idx) {
+  var x0 = c.x - 31;
+  if (!c.alive) {
+    // 废墟 + 余烬
+    ctx.fillStyle = "#1c1220";
+    ctx.beginPath();
+    ctx.moveTo(x0, GROUND_Y);
+    ctx.lineTo(x0 + 10, GROUND_Y - 8);
+    ctx.lineTo(x0 + 18, GROUND_Y - 3);
+    ctx.lineTo(x0 + 30, GROUND_Y - 10);
+    ctx.lineTo(x0 + 42, GROUND_Y - 4);
+    ctx.lineTo(x0 + 54, GROUND_Y - 7);
+    ctx.lineTo(x0 + 62, GROUND_Y);
+    ctx.closePath(); ctx.fill();
+    for (var k = 0; k < 4; k++) {
+      ctx.globalAlpha = 0.35 + 0.35 * Math.sin(ambient * (5 + k) + idx * 2 + k);
+      ctx.fillStyle = "#ff5a3c";
+      ctx.fillRect(x0 + 12 + k * 13, GROUND_Y - 5 - (k % 2) * 3, 2, 2);
+      ctx.globalAlpha = 1;
+    }
+    return;
+  }
+  var sky = CITY_SKY[idx % 2], b;
+  ctx.fillStyle = "#151533";
+  for (b = 0; b < sky.length; b++) ctx.fillRect(x0 + sky[b][0], GROUND_Y - sky[b][2], sky[b][1], sky[b][2]);
+  ctx.strokeStyle = "rgba(120,140,255,0.35)"; ctx.lineWidth = 1;
+  for (b = 0; b < sky.length; b++) ctx.strokeRect(x0 + sky[b][0] + 0.5, GROUND_Y - sky[b][2] + 0.5, sky[b][1] - 1, sky[b][2] - 1);
+  ctx.fillStyle = "#ffd76a";
+  for (b = 0; b < sky.length; b++) {
+    var bw = sky[b][1], bh = sky[b][2];
+    for (var wy = 4; wy < bh - 3; wy += 6) for (var wx = 2; wx < bw - 2; wx += 5) {
+      if ((idx * 31 + b * 17 + wx * 3 + wy * 5) % 7 < 3) {
+        ctx.globalAlpha = ((idx + b + wx + wy) % 11 === 0) ? 0.4 + 0.6 * Math.abs(Math.sin(ambient * 3 + wx)) : 0.85;
+        ctx.fillRect(x0 + sky[b][0] + wx, GROUND_Y - bh + wy, 1.6, 2.2);
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+function drawTurret(t) {
+  var x = t.x;
+  ctx.fillStyle = "#0f2438"; ctx.strokeStyle = "#35e0ff"; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x - 17, GROUND_Y);
+  ctx.lineTo(x - 9, GROUND_Y - 11);
+  ctx.lineTo(x + 9, GROUND_Y - 11);
+  ctx.lineTo(x + 17, GROUND_Y);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, GROUND_Y - 11, 5.5, Math.PI, 0);
+  ctx.fillStyle = "#16405c"; ctx.fill(); ctx.stroke();
+  var label;
+  if (t.ammo <= 0) { label = "OUT"; ctx.fillStyle = "#5a6a7a"; }
+  else if (t.ammo <= 3) { label = "LOW " + t.ammo; ctx.fillStyle = ((ambient * 4) % 1 < 0.55) ? "#ff5566" : "#7a3038"; }
+  else { label = String(t.ammo); ctx.fillStyle = "#9fefff"; }
+  ctx.font = "700 11px sans-serif"; ctx.textAlign = "center";
+  ctx.fillText(label, x, GROUND_Y + 16);
+}
+function drawTrail(m, tailColor, headColor, bigHead) {
+  if (Math.abs(m.x - m.sx) + Math.abs(m.y - m.sy) > 2) {
+    var g = ctx.createLinearGradient(m.sx, m.sy, m.x, m.y);
+    g.addColorStop(0, tailColor); g.addColorStop(1, headColor);
+    ctx.strokeStyle = g; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(m.sx, m.sy); ctx.lineTo(m.x, m.y); ctx.stroke();
+  }
+  ctx.shadowColor = headColor; ctx.shadowBlur = 8;
+  ctx.fillStyle = "#fff";
+  ctx.beginPath(); ctx.arc(m.x, m.y, bigHead ? 3 : 2.2, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+}
+function drawExplosion(ex) {
+  var r = blastRadius(ex.age, ex.maxR, ex.dur);
+  if (r <= 0) return;
+  var life = Math.max(0, 1 - ex.age / ex.dur);
+  var g = ctx.createRadialGradient(ex.x, ex.y, 0, ex.x, ex.y, Math.max(1, r));
+  g.addColorStop(0, "rgba(255,255,255," + (0.9 * life + 0.1).toFixed(3) + ")");
+  g.addColorStop(0.55, "rgba(255,205,110," + (0.75 * life).toFixed(3) + ")");
+  g.addColorStop(1, "rgba(255,110,40,0)");
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(ex.x, ex.y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "rgba(255,190,110," + (0.85 * life).toFixed(3) + ")"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(ex.x, ex.y, r, 0, Math.PI * 2); ctx.stroke();
+}
+function drawCross(x, y) {
+  ctx.strokeStyle = "rgba(120,240,255,0.8)"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 14, y); ctx.lineTo(x - 5, y);
+  ctx.moveTo(x + 5, y); ctx.lineTo(x + 14, y);
+  ctx.moveTo(x, y - 14); ctx.lineTo(x, y - 5);
+  ctx.moveTo(x, y + 5); ctx.lineTo(x, y + 14);
+  ctx.stroke();
+}
+function render() {
+  ctx.setTransform(view.scale * view.dpr, 0, 0, view.scale * view.dpr, 0, 0);
+  // 天空渐变
+  var g = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  g.addColorStop(0, "#04050e"); g.addColorStop(0.55, "#120a26"); g.addColorStop(1, "#2b1038");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, GROUND_Y);
+  // 星空
+  for (var s = 0; s < stars.length; s++) {
+    var st = stars[s];
+    ctx.globalAlpha = 0.2 + 0.55 * Math.abs(Math.sin(ambient * st.sp + st.ph));
+    ctx.fillStyle = "#cfd8ff";
+    ctx.fillRect(st.x, st.y, st.r, st.r);
+  }
+  ctx.globalAlpha = 1;
+  ctx.save();
+  if (shake > 0.2) ctx.translate((Math.random() * 2 - 1) * shake, (Math.random() * 2 - 1) * shake);
+  // 地面
+  ctx.fillStyle = "#0a0a14"; ctx.fillRect(-20, GROUND_Y, W + 40, H - GROUND_Y);
+  ctx.strokeStyle = "#39e58c"; ctx.lineWidth = 2;
+  ctx.shadowColor = "#39e58c"; ctx.shadowBlur = 8;
+  ctx.beginPath(); ctx.moveTo(-20, GROUND_Y); ctx.lineTo(W + 20, GROUND_Y); ctx.stroke();
+  ctx.shadowBlur = 0;
+  // 城市 / 炮塔
+  for (var i = 0; i < cities.length; i++) drawCity(cities[i], i);
+  for (i = 0; i < turrets.length; i++) drawTurret(turrets[i]);
+  // 拖尾
+  for (i = 0; i < missiles.length; i++) drawTrail(missiles[i], "rgba(255,90,60,0.12)", "#ffd9a0", missiles[i].mirv);
+  for (i = 0; i < interceptors.length; i++) drawTrail(interceptors[i], "rgba(60,224,255,0.12)", "#eaffff", false);
+  // 爆炸
+  for (i = 0; i < explosions.length; i++) drawExplosion(explosions[i]);
+  // 粒子
+  for (i = 0; i < particles.length; i++) {
+    var pt = particles[i];
+    ctx.globalAlpha = Math.max(0, Math.min(1, pt.life * 2));
+    ctx.fillStyle = pt.color;
+    ctx.fillRect(pt.x - pt.size / 2, pt.y - pt.size / 2, pt.size, pt.size);
+  }
+  ctx.globalAlpha = 1;
+  // 浮字
+  ctx.font = "800 14px sans-serif"; ctx.textAlign = "center";
+  for (i = 0; i < floats.length; i++) {
+    var fl = floats[i];
+    ctx.globalAlpha = Math.max(0, Math.min(1, fl.life / 0.5));
+    ctx.fillStyle = fl.color;
+    ctx.fillText(fl.text, fl.x, fl.y);
+  }
+  ctx.globalAlpha = 1;
+  // 瞄准十字（鼠标）
+  if (mouse.seen && state === "PLAYING") drawCross(mouse.x, mouse.y);
+  // 波次横幅
+  if (bannerT > 0) {
+    ctx.globalAlpha = Math.min(1, bannerT / 0.5);
+    ctx.fillStyle = "#9ff3ff"; ctx.font = "800 46px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("WAVE " + wave, W / 2, 215);
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+}
+
+// ---------- 主循环（dt 上限 0.05s，防后台切回大步长） ----------
+var last = 0;
+function frame(t) {
+  var dt = Math.min((t - last) / 1000, 0.05); last = t;
+  if (dt > 0) ambient += dt;
+  if (state === "PLAYING") update(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+
+// ---------- 输入（触控 + 鼠标 + 键盘） ----------
+function canvasPos(clientX, clientY) {
+  var rect = canvas.getBoundingClientRect();
+  return { x: (clientX - rect.left) / rect.width * W, y: (clientY - rect.top) / rect.height * H };
+}
+function pressAt(clientX, clientY) {
+  ensureAudio();
+  var p = canvasPos(clientX, clientY);
+  mouse.x = p.x; mouse.y = p.y; mouse.seen = true;
+  if (state === "PLAYING") fireAt(p.x, p.y);
+}
+canvas.addEventListener("mousemove", function (e) { var p = canvasPos(e.clientX, e.clientY); mouse.x = p.x; mouse.y = p.y; mouse.seen = true; });
+canvas.addEventListener("mousedown", function (e) { pressAt(e.clientX, e.clientY); });
+canvas.addEventListener("touchstart", function (e) { e.preventDefault(); pressAt(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+mainBtn.addEventListener("click", function (e) {
+  e.stopPropagation(); ensureAudio();
+  if (state === "SUMMARY") nextWave(); else newGame();
+});
+overlay.addEventListener("click", function (e) {
+  if (state === "SUMMARY") { e.stopPropagation(); nextWave(); }
+});
+document.addEventListener("keydown", function (e) {
+  if (e.key === "m" || e.key === "M") { toggleMute(); return; }
+  if (e.key === "Enter" || e.key === " ") {
+    e.preventDefault(); ensureAudio();
+    if (state === "SUMMARY") nextWave();
+    else if (state === "START" || state === "OVER") newGame();
+  }
+});
+
+// ---------- 静音 ----------
+function toggleMute() {
+  muted = !muted;
+  try { localStorage.setItem("mc_muted", muted ? "1" : "0"); } catch (e) {}
+  muteBtn.textContent = muted ? "SOUND OFF" : "SOUND ON";
+  muteBtn.style.opacity = muted ? "0.55" : "1";
+  ensureAudio();
+  try { if (master) master.gain.value = muted ? 0 : 1; } catch (e2) {}
+}
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); toggleMute(); });
+
+// ---------- 界面 ----------
+function showOverlay(title, html, btnLabel, showFinal) {
+  ovTitle.textContent = title;
+  ovText.innerHTML = html;
+  mainBtn.textContent = btnLabel;
+  finalScore.style.display = showFinal ? "block" : "none";
+  finalScore.textContent = String(score);
+  overlay.style.display = "flex";
+}
+function hideOverlay() { overlay.style.display = "none"; }
+function showStart() {
+  state = "START";
+  showOverlay("MISSILE COMMAND",
+    "Defend your six cities from waves of incoming warheads.<br>Click / tap anywhere to launch an interceptor from the nearest armed silo.<br>Interceptors detonate on the spot — shockwaves destroy warheads and chain into combos.<br>Silos: left 10 · center 15 · right 10 ammo. Every 2 waves rebuilds a city.<br><br>Best score: " + best,
+    "START", false);
+}
+
+// ---------- 启动 ----------
+setupWorld();
+resize();
+elBest.textContent = String(best);
+muteBtn.textContent = muted ? "SOUND OFF" : "SOUND ON";
+muteBtn.style.opacity = muted ? "0.55" : "1";
+showStart();
+requestAnimationFrame(frame);
+
+// 测试钩子（不影响游戏逻辑）
+window.__mc = {
+  W: W, H: H, GROUND_Y: GROUND_Y,
+  get state() { return state; }, get score() { return score; }, get best() { return best; },
+  get wave() { return wave; }, set wave(v) { wave = v; },
+  get combo() { return combo; },
+  get waveQueue() { return waveQueue; }, set waveQueue(v) { waveQueue = v; },
+  get missiles() { return missiles; }, get interceptors() { return interceptors; },
+  get explosions() { return explosions; }, get turrets() { return turrets; }, get cities() { return cities; },
+  stepToward: stepToward, inBlast: inBlast, blastRadius: blastRadius,
+  fireAt: fireAt, update: update, spawnEnemyMissile: spawnEnemyMissile,
+  splitMirv: splitMirv, newGame: newGame, startWave: startWave, endWave: endWave, gameOver: gameOver
+};
+</script>
+</body>
+</html>
